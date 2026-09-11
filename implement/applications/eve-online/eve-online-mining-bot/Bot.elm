@@ -15,6 +15,7 @@
    + In Overview window, make asteroids visible.
    + Open one inventory window.
    + If you want to use drones for defense against rats, place them in the drone bay, and open the 'Drones' window.
+   + If flying in wormhole space with `wormhole = yes`, leave the Directional Scanner window open and its range and angle wide enough to cover the grid, bind its scan to `V` (the client's own default) and leave it bound, and leave the Local chat window open.
 
    ## Configuration Settings
 
@@ -32,6 +33,9 @@
    + `afterburner-module-text` : Text found in tooltips of the afterburner module.
    + `afterburner-distance-threshold` : Distance threshold (in meters) at which to activate/deactivate the afterburner.
    + `return-drones-when-no-rats-visible` : Return drones to bay when no rats are visible in space. Default is `yes`.
+   + `wormhole` : Turn on wormhole-space safety -- periodically refresh the Directional Scanner and run for the unload station/structure once it shows a ship that is not one of ours. Local chat carries no roster in a wormhole, unlike known space, which is why this exists as its own setting rather than relying on `hide-when-neutral-in-local`. The only supported values are `no` and `yes`, default `no`.
+   + `friendly-ship-tag` : Only meaningful with `wormhole = yes`. A substring marking a ship on the Directional Scanner as one of ours; every other ship reads hostile, and so does every ship when this is unset.
+   + `dscan-interval-seconds` : Only meaningful with `wormhole = yes`. How often to refresh the Directional Scanner, in seconds. Default 5.
 
    When using more than one setting, start a new line for each setting in the text input field.
    Here is an example of a complete settings string:
@@ -143,6 +147,9 @@ defaultBotSettings =
     , afterburnerDistanceThreshold = Nothing
     , compressFromMiningHold = PromptParser.No
     , returnDronesWhenNoRatsVisible = PromptParser.Yes
+    , wormhole = PromptParser.No
+    , friendlyShipTag = Nothing
+    , dscanIntervalSeconds = defaultDscanIntervalSeconds
     }
 
 
@@ -324,10 +331,830 @@ parseBotSettings =
                     (\returnDrones settings -> { settings | returnDronesWhenNoRatsVisible = returnDrones })
              }
            )
+         , ( "wormhole"
+           , { alternativeNames = []
+             , description = "Turn on wormhole-space safety, ported from `eve-online-gas-huffer`: periodically refresh the Directional Scanner and, once it shows a ship this bot does not recognize as one of ours, run for the configured unload station or structure the same way a low shield percentage does. Local chat carries no passive roster in a wormhole, so this replaces `hide-when-neutral-in-local`'s security-status heuristic there -- see `friendly-ship-tag`. The only supported values are `no` and `yes`, default `no` so an existing settings string is unaffected."
+             , valueParser =
+                PromptParser.valueTypeYesOrNo
+                    (\wormhole settings -> { settings | wormhole = wormhole })
+             }
+           )
+         , ( "friendly-ship-tag"
+           , { alternativeNames = []
+             , description = "Only meaningful with `wormhole=yes`. A substring marking a ship seen on the Directional Scanner as one of ours; every other ship reads hostile, and so does every ship when this setting is unset -- an unset tag means trust nobody, never trust everybody. Matched ignoring case, so it can be a corporation ticker in brackets or a fleet naming convention."
+             , valueParser =
+                PromptParser.valueTypeString
+                    (\tag settings ->
+                        { settings
+                            | friendlyShipTag =
+                                case String.trim tag of
+                                    "" ->
+                                        Nothing
+
+                                    trimmedTag ->
+                                        Just trimmedTag
+                        }
+                    )
+             }
+           )
+         , ( "dscan-interval-seconds"
+           , { alternativeNames = []
+             , description = "Only meaningful with `wormhole=yes`. How often to refresh the Directional Scanner, in seconds. Default " ++ String.fromInt defaultDscanIntervalSeconds ++ ", unmeasured against this bot's own runs -- see the doc comment on `defaultDscanIntervalSeconds`."
+             , valueParser =
+                PromptParser.valueTypeInteger
+                    (\seconds settings -> { settings | dscanIntervalSeconds = seconds })
+             }
+           )
          ]
             |> Dict.fromList
         )
         defaultBotSettings
+
+
+{-|
+
+
+## Wormhole safety (issue #490)
+
+`hide-when-neutral-in-local`'s own fallback is a k-space idea: it reads the
+current system's security-status percent, which a wormhole does not have, and
+even where an operator sets it explicitly, local chat in a wormhole carries no
+passive roster the way known-space local does -- a hostile pilot gives this
+bot no warning there before they are already on top of it.
+
+`eve-online-gas-huffer` was built for exactly this environment (issues #462,
+#463) and this section is that bot's Directional-Scanner-based hostile
+detection, ported to this bot's own decision tree rather than assumed to slot
+in unchanged. Two differences from the huffer's own copy, both because this
+bot is not that one:
+
+  - **No cloak, no celestial-bounce escalation.** The huffer has nothing but
+    open space to retreat into and no docking step of its own, so its
+    escalation is cloak-then-bounce. This bot already has a retreat that ends
+    somewhere real -- `runAway`, the same one a low shield percentage
+    triggers -- so a hostile on D-Scan is composed with that machinery
+    instead of a second one invented beside it.
+  - **`harvestableCloudTypeMarker`** (the huffer's own gas cloud) is dropped
+    from `notAShipOnDscanTypeMarkers` rather than replaced with an asteroid
+    marker: nothing here has measured what an ore asteroid or anomaly reads as
+    on this bot's Directional Scanner, and this file's own rule is that
+    nothing goes in that list without a string somebody has read off a live
+    client.
+
+Everything below is `wormhole = no` by default, so an existing settings
+string is unaffected -- see `wormholeSafetyStep`, the one place any of this is
+read from the decision tree.
+
+**Untested against a live client.** The huffer's own corpus (quoted in its
+`Bot.elm`) is what every number and every doc comment below still leans on;
+nothing here has watched a ship arrive on this bot's own Directional Scanner.
+
+-}
+type HostileTrust
+    = TrustNobody
+    | TrustShipsTagged String
+
+
+hostileTrustFromSettings : BotSettings -> HostileTrust
+hostileTrustFromSettings settings =
+    case settings.friendlyShipTag of
+        Nothing ->
+            TrustNobody
+
+        Just tag ->
+            TrustShipsTagged tag
+
+
+{-| Whether a ship named this way is one of ours.
+
+Matched as a substring and ignoring case, because the tag is a naming
+convention rather than a name. `TrustNobody` answers `False` for every name
+there is, including the empty one -- and the settings handler for
+`friendly-ship-tag` is what stops an empty tag ever reaching
+`TrustShipsTagged`, where it would match every ship instead.
+
+-}
+shipReadsFriendly : HostileTrust -> String -> Bool
+shipReadsFriendly trust shipName =
+    case trust of
+        TrustNobody ->
+            False
+
+        TrustShipsTagged tag ->
+            stringContainsIgnoringCase tag shipName
+
+
+describeHostileTrust : HostileTrust -> String
+describeHostileTrust trust =
+    case trust of
+        TrustNobody ->
+            "Friendly ships: none named, so every ship reads hostile ('friendly-ship-tag' is unset)."
+
+        TrustShipsTagged tag ->
+            "Friendly ships: those whose name carries '" ++ tag ++ "'; every other ship reads hostile."
+
+
+chatUserFleetmateMarker : String
+chatUserFleetmateMarker =
+    "Pilot is in your fleet"
+
+
+{-| Whether Local says this pilot is one of ours.
+
+`Nothing` is a chat row whose standing icon this reading could not resolve,
+and it answers `False` -- a stranger, the fail-closed direction for wormhole
+safety.
+
+-}
+chatUserIsKnownFleetmate : EveOnline.ParseUserInterface.ChatUserEntry -> Bool
+chatUserIsKnownFleetmate chatUser =
+    case chatUser.standingIconHint of
+        Nothing ->
+            False
+
+        Just standingIconHint ->
+            stringContainsIgnoringCase chatUserFleetmateMarker standingIconHint
+
+
+{-| Every pilot on the overview who Local does not say is a fleet-mate.
+
+Ported from `eve-online-gas-huffer`'s copy of `getNamesOfOtherPilotsInOverview`
+(`eve-online-combat-anomaly-bot`'s own shape): the chat rows are what say a
+name belongs to a _player_, so an overview row is a pilot exactly where its
+Name appears in Local, and the fleet-mates are filtered out of that list
+before the match rather than after it.
+
+Compared trimmed and ignoring case, because the two sides are two renderings
+of one name by two widgets.
+
+-}
+pilotsOnTheOverviewNotInTheFleet :
+    List EveOnline.ParseUserInterface.ChatUserEntry
+    -> List OverviewWindowEntry
+    -> List String
+pilotsOnTheOverviewNotInTheFleet localChatUsers overviewEntries =
+    let
+        normalize =
+            String.trim >> String.toLower
+
+        strangers =
+            localChatUsers
+                |> List.filter (chatUserIsKnownFleetmate >> not)
+                |> List.filterMap .name
+                |> List.map normalize
+    in
+    overviewEntries
+        |> List.filterMap .objectName
+        |> List.filter (\name -> strangers |> List.member (normalize name))
+
+
+{-| Every rat on the overview, by this bot's own icon-colour rule
+(`iconSpriteHasColorOfRat`, defined below for `overviewShowsRat`), as rows
+rather than names -- a rat whose Name column is not visible still fires this,
+and `gridEvidenceFromReading` is what names it afterwards.
+-}
+ratsOnTheOverview : List OverviewWindowEntry -> List OverviewWindowEntry
+ratsOnTheOverview =
+    List.filter iconSpriteHasColorOfRat
+
+
+{-| Every drone group the client writes carries this word, and no ship hull
+does -- see `eve-online-gas-huffer`'s own copy of this constant for the
+measurement (run 6 evaded on `Mining Drone I` rows and harvested nothing).
+Matched on the Type cell only: a Name is whatever a player typed, and a ship
+called "Dronebait" must still read hostile.
+-}
+droneTypeMarker : String
+droneTypeMarker =
+    "Drone"
+
+
+{-| Type-column markers that say a D-Scan row is a structure or a deployable
+rather than a ship, ported from `eve-online-gas-huffer`'s
+`notAShipOnDscanTypeMarkers` with the gas huffer's own harvestable-cloud
+marker dropped -- see this section's own doc comment for why nothing replaces
+it.
+-}
+notAShipOnDscanTypeMarkers : List String
+notAShipOnDscanTypeMarkers =
+    [ "Astrahus"
+    , "Fortizar"
+    , "Keepstar"
+    , "Raitaru"
+    , "Azbel"
+    , "Sotiyo"
+    , "Athanor"
+    , "Tatara"
+    , "Ansiblex Jump Gate"
+    , "Pharolux Cyno Beacon"
+    , "Tenebrex Cyno Jammer"
+    , "Metenox Moon Drill"
+    , "Control Tower"
+    , "Customs Office"
+    , "Mobile "
+    , droneTypeMarker
+    ]
+
+
+{-| Whether a D-Scan row's Type says it is not a ship. Matched ignoring case
+as a substring. A Type cell this parser could not read is not a structure,
+so an absent Type falls through to the ship branch in `dscanRowVerdict`.
+-}
+dscanTypeIsNotAShip : String -> Bool
+dscanTypeIsNotAShip typeText =
+    notAShipOnDscanTypeMarkers
+        |> List.any (\marker -> stringContainsIgnoringCase marker typeText)
+
+
+structureTypeThatIsNotAShip : String -> Maybe String
+structureTypeThatIsNotAShip typeText =
+    if dscanTypeIsNotAShip typeText then
+        Just typeText
+
+    else
+        Nothing
+
+
+{-| A probe is not a ship -- except a combat probe, which is a hunt in
+progress. Ported from `eve-online-gas-huffer`'s `dscanRowIsHarmlessProbe`;
+see that bot's own doc comment for the measurement behind the distinction
+(evading combat probes is good, evading a system's own scanner probes is
+paranoid) and for why both cells are tested.
+-}
+probeMarker : String
+probeMarker =
+    "Scanner Probe"
+
+
+combatProbeMarker : String
+combatProbeMarker =
+    "Combat Scanner Probe"
+
+
+dscanRowIsHarmlessProbe : { name : Maybe String, type_ : Maybe String } -> Bool
+dscanRowIsHarmlessProbe row =
+    let
+        anyCellContains marker =
+            [ row.name, row.type_ ]
+                |> List.filterMap identity
+                |> List.any (stringContainsIgnoringCase marker)
+    in
+    anyCellContains probeMarker && not (anyCellContains combatProbeMarker)
+
+
+{-| The three cells of one D-Scan row, as a record a case can write out --
+`eve-online-gas-huffer`'s own shape, kept separate from
+`EveOnline.ParseUserInterface.DirectionalScanResult` because that type also
+carries a `uiNode` nothing here reads.
+-}
+type alias DscanSighting =
+    { name : Maybe String
+    , type_ : Maybe String
+    , distance : Maybe String
+    }
+
+
+dscanSightingsFromWindow : EveOnline.ParseUserInterface.DirectionalScannerWindow -> List DscanSighting
+dscanSightingsFromWindow window =
+    window.scanResults
+        |> List.map (\row -> { name = row.name, type_ = row.type_, distance = row.distance })
+
+
+{-| What this bot makes of one row on D-Scan. Ported whole from
+`eve-online-gas-huffer`'s `dscanRowVerdict`; see that bot's own doc comment
+for why absent evidence reads as hostile here (inverting this repo's usual
+direction) and for the `RowCouldNotBeRead` case, added there after a
+mid-redraw D-Scan reading flipped a system's own scanner probes between
+harmless and hostile from one refresh to the next.
+-}
+type DscanRowVerdict
+    = RowIsNotAShip String
+    | ShipIsOneOfOurs String
+    | ShipIsHostile DscanHostileReason
+    | RowCouldNotBeRead
+
+
+type DscanHostileReason
+    = ShipNameCarriesNoFriendlyTag String
+    | ShipNameCouldNotBeRead
+
+
+dscanRowVerdict : HostileTrust -> DscanSighting -> DscanRowVerdict
+dscanRowVerdict trust row =
+    if dscanRowIsHarmlessProbe { name = row.name, type_ = row.type_ } then
+        RowIsNotAShip (row.type_ |> Maybe.withDefault probeMarker)
+
+    else
+        case row.type_ |> Maybe.andThen structureTypeThatIsNotAShip of
+            Just typeText ->
+                RowIsNotAShip typeText
+
+            Nothing ->
+                case ( row.type_, row.name ) of
+                    ( Nothing, Nothing ) ->
+                        RowCouldNotBeRead
+
+                    ( _, Nothing ) ->
+                        ShipIsHostile ShipNameCouldNotBeRead
+
+                    ( _, Just name ) ->
+                        if shipReadsFriendly trust name then
+                            ShipIsOneOfOurs name
+
+                        else
+                            ShipIsHostile (ShipNameCarriesNoFriendlyTag name)
+
+
+dscanHostileReason : DscanRowVerdict -> Maybe String
+dscanHostileReason verdict =
+    case verdict of
+        ShipIsHostile (ShipNameCarriesNoFriendlyTag name) ->
+            Just ("'" ++ name ++ "'")
+
+        ShipIsHostile ShipNameCouldNotBeRead ->
+            Just "one whose Name cell this parser could not read at all"
+
+        RowIsNotAShip _ ->
+            Nothing
+
+        ShipIsOneOfOurs _ ->
+            Nothing
+
+        RowCouldNotBeRead ->
+            Nothing
+
+
+describeDscanRowVerdict : DscanRowVerdict -> String
+describeDscanRowVerdict verdict =
+    case verdict of
+        RowIsNotAShip typeText ->
+            "not a ship (Type '" ++ typeText ++ "')"
+
+        ShipIsOneOfOurs name ->
+            "ours ('" ++ name ++ "')"
+
+        ShipIsHostile (ShipNameCarriesNoFriendlyTag name) ->
+            "HOSTILE, no friendly tag ('" ++ name ++ "')"
+
+        ShipIsHostile ShipNameCouldNotBeRead ->
+            "HOSTILE, Name cell unreadable"
+
+        RowCouldNotBeRead ->
+            "row unreadable this reading, not judged"
+
+
+{-| What the Directional Scanner is telling this bot, including that it is
+not. Four answers, ported from `eve-online-gas-huffer`'s `DscanState`, so "we
+do not know" cannot collapse into "clean" the way `Nothing`/`Maybe.withDefault`
+would.
+-}
+type DscanState
+    = DscanWindowIsNotInTheReading
+    | DscanHasNeverBeenScanned
+    | DscanIsStale { secondsSinceScan : Int, staleAfterSeconds : Int }
+    | DscanWasRead (List DscanRowVerdict)
+
+
+{-| How many refresh intervals a scan may be old before it stops counting. A
+multiple of `dscan-interval-seconds` rather than a bare number, so the two
+cannot drift apart. Kept at the huffer's own value of 3, unmeasured against
+this bot's own runs.
+-}
+dscanStaleAfterIntervals : Int
+dscanStaleAfterIntervals =
+    3
+
+
+dscanStaleAfterSeconds : Int -> Int
+dscanStaleAfterSeconds intervalSeconds =
+    intervalSeconds * dscanStaleAfterIntervals
+
+
+dscanState :
+    HostileTrust
+    ->
+        { windowSightings : Maybe (List DscanSighting)
+        , secondsSinceScan : Maybe Int
+        , staleAfterSeconds : Int
+        }
+    -> DscanState
+dscanState trust reading =
+    case reading.windowSightings of
+        Nothing ->
+            DscanWindowIsNotInTheReading
+
+        Just sightings ->
+            case reading.secondsSinceScan of
+                Nothing ->
+                    DscanHasNeverBeenScanned
+
+                Just secondsSinceScan ->
+                    if reading.staleAfterSeconds < secondsSinceScan then
+                        DscanIsStale
+                            { secondsSinceScan = secondsSinceScan
+                            , staleAfterSeconds = reading.staleAfterSeconds
+                            }
+
+                    else
+                        DscanWasRead (sightings |> List.map (dscanRowVerdict trust))
+
+
+{-| Everything one reading says about whether this ship should still be here.
+A record of plain facts rather than a `BotDecisionContext`, so a case can
+execute `gridVerdict` directly -- the same reason `eve-online-gas-huffer`
+gives for its own copy.
+-}
+type alias GridEvidence =
+    { ratsOnOverview : List String
+    , pilotsNotInTheFleet : List String
+    , localChatIsReadable : Bool
+    , dscan : DscanState
+    }
+
+
+{-| The verdict, and the two ways of not being clean -- a grid this bot
+cannot see is not one it may go on mining, and it is also not one it has seen
+a hostile on. `gridReadsClean` answers `True` for `GridIsClean` and nothing
+else.
+-}
+type GridVerdict
+    = GridIsClean
+    | SomethingIsOnTheGrid (List String)
+    | CannotTellWhetherTheGridIsClean (List String)
+
+
+gridReadsClean : GridVerdict -> Bool
+gridReadsClean verdict =
+    verdict == GridIsClean
+
+
+gridVerdict : GridEvidence -> GridVerdict
+gridVerdict evidence =
+    let
+        named what names =
+            String.fromInt (List.length names)
+                ++ " "
+                ++ what
+                ++ (if List.isEmpty names then
+                        ""
+
+                    else
+                        ": " ++ String.join ", " names
+                   )
+
+        hostileReasons =
+            [ if List.isEmpty evidence.ratsOnOverview then
+                Nothing
+
+              else
+                Just (named "rat(s) on the overview by icon colour" evidence.ratsOnOverview)
+            , if List.isEmpty evidence.pilotsNotInTheFleet then
+                Nothing
+
+              else
+                Just
+                    (named "pilot(s) on the overview who are not in this fleet"
+                        evidence.pilotsNotInTheFleet
+                    )
+            ]
+                |> List.filterMap identity
+
+        hostileShips =
+            case evidence.dscan of
+                DscanWasRead verdicts ->
+                    verdicts |> List.filterMap dscanHostileReason
+
+                _ ->
+                    []
+
+        dscanHostileClause =
+            if List.isEmpty hostileShips then
+                []
+
+            else
+                [ named "ship(s) on D-Scan that are not ours" hostileShips ]
+
+        doubts =
+            [ case evidence.dscan of
+                DscanWindowIsNotInTheReading ->
+                    Just "there is no Directional Scanner window in this reading, so nothing here can see a ship that is not already on the overview"
+
+                DscanHasNeverBeenScanned ->
+                    Just "the Directional Scanner has not answered a refresh yet this session"
+
+                DscanIsStale stale ->
+                    Just
+                        ("the last Directional Scan completed "
+                            ++ String.fromInt stale.secondsSinceScan
+                            ++ "s ago, past the "
+                            ++ String.fromInt stale.staleAfterSeconds
+                            ++ "s a scan is believed for"
+                        )
+
+                DscanWasRead _ ->
+                    Nothing
+            , if evidence.localChatIsReadable then
+                Nothing
+
+              else
+                Just "Local chat is not readable, so nothing here can tell which overview rows are pilots at all"
+            ]
+                |> List.filterMap identity
+    in
+    case hostileReasons ++ dscanHostileClause of
+        [] ->
+            case doubts of
+                [] ->
+                    GridIsClean
+
+                _ ->
+                    CannotTellWhetherTheGridIsClean doubts
+
+        reasons ->
+            SomethingIsOnTheGrid reasons
+
+
+{-| The evidence this reading carries, assembled from the client. Ported from
+`eve-online-gas-huffer`'s `gridEvidenceFromReading`; see that bot's own doc
+comment for why `overviewEntryIsDisplayed` is deliberately not applied here.
+-}
+gridEvidenceFromReading :
+    HostileTrust
+    -> { secondsSinceScan : Maybe Int, staleAfterSeconds : Int }
+    -> ReadingFromGameClient
+    -> GridEvidence
+gridEvidenceFromReading trust scanAge readingFromGameClient =
+    let
+        localChatUsers =
+            readingFromGameClient
+                |> localChatWindowFromUserInterface
+                |> Maybe.andThen .userlist
+                |> Maybe.map .visibleUsers
+
+        overviewEntries =
+            readingFromGameClient.overviewWindows |> List.concatMap .entries
+    in
+    { ratsOnOverview =
+        ratsOnTheOverview overviewEntries
+            |> List.map (.objectName >> Maybe.withDefault "a rat whose Name column is not readable")
+    , pilotsNotInTheFleet =
+        pilotsOnTheOverviewNotInTheFleet
+            (localChatUsers |> Maybe.withDefault [])
+            overviewEntries
+    , localChatIsReadable = localChatUsers /= Nothing
+    , dscan =
+        dscanState trust
+            { windowSightings =
+                readingFromGameClient.directionalScannerWindow
+                    |> Maybe.map dscanSightingsFromWindow
+            , secondsSinceScan = scanAge.secondsSinceScan
+            , staleAfterSeconds = scanAge.staleAfterSeconds
+            }
+    }
+
+
+gridEvidenceFromContext : BotDecisionContext -> GridEvidence
+gridEvidenceFromContext context =
+    let
+        settings =
+            context.eventContext.botSettings
+    in
+    gridEvidenceFromReading (hostileTrustFromSettings settings)
+        { secondsSinceScan =
+            secondsSinceLastScan
+                { nowMilliseconds = context.eventContext.timeInMilliseconds
+                , dscan = context.memory.dscan
+                }
+        , staleAfterSeconds = dscanStaleAfterSeconds settings.dscanIntervalSeconds
+        }
+        context.readingFromGameClient
+
+
+describeGrid : GridEvidence -> String
+describeGrid evidence =
+    (case gridVerdict evidence of
+        GridIsClean ->
+            "Grid: CLEAN -- nothing on the overview or on D-Scan says otherwise."
+
+        SomethingIsOnTheGrid reasons ->
+            "Grid: SOMETHING IS HERE -- " ++ String.join "; " reasons ++ "."
+
+        CannotTellWhetherTheGridIsClean doubts ->
+            "Grid: CANNOT TELL, which is not the same as clean -- "
+                ++ String.join "; " doubts
+                ++ "."
+    )
+        ++ " "
+        ++ describeDscanRows evidence.dscan
+
+
+describeDscanRows : DscanState -> String
+describeDscanRows state =
+    case state of
+        DscanWindowIsNotInTheReading ->
+            "D-Scan: no window in this reading, so there are no rows to print."
+
+        DscanHasNeverBeenScanned ->
+            "D-Scan: the window is open and no refresh has completed yet this session."
+
+        DscanIsStale stale ->
+            "D-Scan: the window is open and its last completed scan is "
+                ++ String.fromInt stale.secondsSinceScan
+                ++ "s old, past the "
+                ++ String.fromInt stale.staleAfterSeconds
+                ++ "s bound, so its rows are not being judged."
+
+        DscanWasRead [] ->
+            "D-Scan: scanned, and nothing at all is on it."
+
+        DscanWasRead verdicts ->
+            "D-Scan judged "
+                ++ String.fromInt (List.length verdicts)
+                ++ " row(s): "
+                ++ (verdicts |> List.map describeDscanRowVerdict |> String.join "; ")
+                ++ "."
+
+
+directionalScanHotkey : List EffectOnWindow.VirtualKeyCode
+directionalScanHotkey =
+    [ EffectOnWindow.vkey_V ]
+
+
+{-| The keys one press holds down, in the order a chord wants them. Down in
+order and up in reverse, so a modifier is released after the key it modifies.
+-}
+hotkeyEffects : List EffectOnWindow.VirtualKeyCode -> List EffectOnWindow.EffectOnWindowStruct
+hotkeyEffects chord =
+    (chord |> List.map EffectOnWindow.KeyDown)
+        ++ (chord |> List.reverse |> List.map EffectOnWindow.KeyUp)
+
+
+{-| Whether a dispatched step pressed **exactly** this chord and nothing
+else. Equality on the step's own key-down sequence rather than "contains
+every key of the chord".
+-}
+stepPressedExactly : List EffectOnWindow.VirtualKeyCode -> List EffectOnWindow.EffectOnWindowStruct -> Bool
+stepPressedExactly chord effects =
+    (effects
+        |> List.filterMap
+            (\effect ->
+                case effect of
+                    EffectOnWindow.KeyDown keyCode ->
+                        Just keyCode
+
+                    _ ->
+                        Nothing
+            )
+    )
+        == chord
+
+
+{-| Unmeasured against this bot's own runs, and stated as such rather than
+dressed up as a derived number -- ported from `eve-online-gas-huffer`, whose
+own default this is, chosen there to cost roughly one reading in ten at the
+shipped step delay rather than a figure derived from how long a hostile
+takes to arrive.
+-}
+defaultDscanIntervalSeconds : Int
+defaultDscanIntervalSeconds =
+    5
+
+
+{-| When the last refresh went out, and when a scan last came back. Two
+clocks rather than one, ported from `eve-online-gas-huffer`'s `DscanMemory`:
+`lastRefreshAskedAtMilliseconds` paces the keypress, `lastScanAtMilliseconds`
+is what the staleness check believes.
+-}
+type alias DscanMemory =
+    { lastRefreshAskedAtMilliseconds : Maybe Int
+    , lastScanAtMilliseconds : Maybe Int
+    }
+
+
+initDscanMemory : DscanMemory
+initDscanMemory =
+    { lastRefreshAskedAtMilliseconds = Nothing
+    , lastScanAtMilliseconds = Nothing
+    }
+
+
+dscanMemoryAfterReading :
+    { nowMilliseconds : Int
+    , refreshAskedInPreviousStep : Bool
+    , windowIsInTheReading : Bool
+    }
+    -> DscanMemory
+    -> DscanMemory
+dscanMemoryAfterReading reading before =
+    { lastRefreshAskedAtMilliseconds =
+        if reading.refreshAskedInPreviousStep then
+            Just reading.nowMilliseconds
+
+        else
+            before.lastRefreshAskedAtMilliseconds
+    , lastScanAtMilliseconds =
+        if reading.refreshAskedInPreviousStep && reading.windowIsInTheReading then
+            Just reading.nowMilliseconds
+
+        else
+            before.lastScanAtMilliseconds
+    }
+
+
+secondsSinceLastScan : { nowMilliseconds : Int, dscan : DscanMemory } -> Maybe Int
+secondsSinceLastScan { nowMilliseconds, dscan } =
+    dscan.lastScanAtMilliseconds
+        |> Maybe.map (\scannedAt -> (nowMilliseconds - scannedAt) // 1000)
+
+
+{-| Whether it is time to press the scan key again. A floor rather than a
+schedule: this host stands down for a human at the keyboard, so a refresh
+that does not go out costs nothing here and is asked for again at the next
+reading past the interval.
+-}
+dscanRefreshIsDue : { nowMilliseconds : Int, intervalSeconds : Int, dscan : DscanMemory } -> Bool
+dscanRefreshIsDue { nowMilliseconds, intervalSeconds, dscan } =
+    case dscan.lastRefreshAskedAtMilliseconds of
+        Nothing ->
+            True
+
+        Just askedAt ->
+            intervalSeconds * 1000 <= nowMilliseconds - askedAt
+
+
+{-| Press the scan key, where the interval says one is due. `Nothing` rather
+than a branch that waits, so a reading with no refresh due falls straight
+through to mining -- and not asked at all on a reading with no ship UI, which
+is a docked one.
+-}
+refreshTheDirectionalScanner : BotDecisionContext -> Maybe DecisionPathNode
+refreshTheDirectionalScanner context =
+    if context.readingFromGameClient.shipUI == Nothing then
+        Nothing
+
+    else if
+        dscanRefreshIsDue
+            { nowMilliseconds = context.eventContext.timeInMilliseconds
+            , intervalSeconds = context.eventContext.botSettings.dscanIntervalSeconds
+            , dscan = context.memory.dscan
+            }
+    then
+        Just
+            (describeBranch
+                ("Refresh the Directional Scanner -- the last refresh went out at least "
+                    ++ String.fromInt context.eventContext.botSettings.dscanIntervalSeconds
+                    ++ "s ago."
+                )
+                (decideActionForCurrentStep (hotkeyEffects directionalScanHotkey))
+            )
+
+    else
+        Nothing
+
+
+{-| The one entry point the decision tree calls. `Nothing` unless
+`wormhole = yes`, so an operator who never sets it gets exactly today's
+behaviour -- no D-Scan refresh, no grid check, nothing changed.
+
+Refreshing the scanner outranks the grid check on the same reading, the same
+ordering `eve-online-gas-huffer` uses, so a reading that presses `V` does not
+also judge a scan that is one keypress out of date.
+
+Composed with this bot's own retreat rather than the huffer's cloak-and-bounce
+escalation -- see this section's own opening doc comment -- `runAway` is what
+a hostile on the grid triggers, exactly as a shield percentage below the
+configured threshold does. That reuses the docking machinery, the unload
+station/structure settings, and `runAway`'s own fallback to
+`dockToRandomStationOrStructure` when none are configured, rather than
+building a second way to leave.
+
+-}
+wormholeSafetyStep : BotDecisionContext -> Maybe DecisionPathNode
+wormholeSafetyStep context =
+    if context.eventContext.botSettings.wormhole /= PromptParser.Yes then
+        Nothing
+
+    else
+        case refreshTheDirectionalScanner context of
+            Just refreshing ->
+                Just refreshing
+
+            Nothing ->
+                let
+                    evidence =
+                        gridEvidenceFromContext context
+                in
+                if gridReadsClean (gridVerdict evidence) then
+                    Nothing
+
+                else
+                    Just
+                        (describeBranch
+                            (describeGrid evidence
+                                ++ " This is a wormhole -- leave rather than keep mining."
+                            )
+                            (runAway context)
+                        )
 
 
 goodStandingPatterns : List String
@@ -402,6 +1229,9 @@ type alias BotSettings =
     , afterburnerDistanceThreshold : Maybe Int
     , compressFromMiningHold : PromptParser.YesOrNo
     , returnDronesWhenNoRatsVisible : PromptParser.YesOrNo
+    , wormhole : PromptParser.YesOrNo
+    , friendlyShipTag : Maybe String
+    , dscanIntervalSeconds : Int
     }
 
 
@@ -418,6 +1248,7 @@ type alias BotMemory =
     , overviewWindows : OverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible : List Bool
     , lastTimeRatVisible : Maybe Int
+    , dscan : DscanMemory
     }
 
 
@@ -479,25 +1310,30 @@ miningBotDecisionRootAfterClearingStrayContextMenu context =
                                 toRunAway
 
                             Nothing ->
-                                continueIfShouldHide
-                                    { ifShouldHide =
-                                        returnDronesToBay context
-                                            |> Maybe.withDefault (dockToUnloadOre context)
-                                    }
-                                    context
-                                    |> Maybe.withDefault
-                                        (ensureUserEnabledNameColumnInOverview
-                                            { ifEnabled =
-                                                ensureMiningHoldIsSelectedInInventoryWindow
-                                                    context.readingFromGameClient
-                                                    (inSpaceWithMiningHoldSelected context shipUI)
-                                            , ifDisabled =
-                                                describeBranch
-                                                    "Please configure the overview to show objects names."
-                                                    askForHelpToGetUnstuck
+                                case wormholeSafetyStep context of
+                                    Just evading ->
+                                        evading
+
+                                    Nothing ->
+                                        continueIfShouldHide
+                                            { ifShouldHide =
+                                                returnDronesToBay context
+                                                    |> Maybe.withDefault (dockToUnloadOre context)
                                             }
-                                            context.readingFromGameClient
-                                        )
+                                            context
+                                            |> Maybe.withDefault
+                                                (ensureUserEnabledNameColumnInOverview
+                                                    { ifEnabled =
+                                                        ensureMiningHoldIsSelectedInInventoryWindow
+                                                            context.readingFromGameClient
+                                                            (inSpaceWithMiningHoldSelected context shipUI)
+                                                    , ifDisabled =
+                                                        describeBranch
+                                                            "Please configure the overview to show objects names."
+                                                            askForHelpToGetUnstuck
+                                                    }
+                                                    context.readingFromGameClient
+                                                )
                 }
                 context.readingFromGameClient
             )
@@ -2359,6 +3195,7 @@ initBotMemory =
     , overviewWindows = EveOnline.BotFramework.initOverviewWindowsMemory
     , lastReadingsInSpaceDronesWindowWasVisible = []
     , lastTimeRatVisible = Nothing
+    , dscan = initDscanMemory
     }
 
 
@@ -2434,11 +3271,23 @@ statusTextFromDecisionContext context =
         describeCurrentReading : String
         describeCurrentReading =
             [ describeMiningHold, describeShip, describeDrones ] |> String.join " "
+
+        describeWormholeSafety : List String
+        describeWormholeSafety =
+            if context.eventContext.botSettings.wormhole == PromptParser.Yes then
+                [ describeHostileTrust (hostileTrustFromSettings context.eventContext.botSettings)
+                , describeGrid (gridEvidenceFromContext context)
+                ]
+
+            else
+                []
     in
-    [ "Session performance: " ++ describeSessionPerformance
-    , "---"
-    , "Current reading: " ++ describeCurrentReading
-    ]
+    ([ "Session performance: " ++ describeSessionPerformance
+     , "---"
+     , "Current reading: " ++ describeCurrentReading
+     ]
+        ++ describeWormholeSafety
+    )
         |> String.join "\n"
 
 
@@ -2582,6 +3431,19 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
 
             else
                 botMemoryBefore.lastTimeRatVisible
+
+        dscan =
+            dscanMemoryAfterReading
+                { nowMilliseconds = context.timeInMilliseconds
+                , refreshAskedInPreviousStep =
+                    context.previousStepsEffects
+                        |> List.head
+                        |> Maybe.map (stepPressedExactly directionalScanHotkey)
+                        |> Maybe.withDefault False
+                , windowIsInTheReading =
+                    context.readingFromGameClient.directionalScannerWindow /= Nothing
+                }
+                botMemoryBefore.dscan
     in
     { lastDockedStationNameFromInfoPanel =
         [ currentStationNameFromInfoPanel, botMemoryBefore.lastDockedStationNameFromInfoPanel ]
@@ -2602,6 +3464,7 @@ updateMemoryForNewReadingFromGame context botMemoryBefore =
             |> EveOnline.BotFramework.integrateCurrentReadingsIntoOverviewWindowsMemory context.readingFromGameClient
     , lastReadingsInSpaceDronesWindowWasVisible = lastReadingsInSpaceDronesWindowWasVisible
     , lastTimeRatVisible = lastTimeRatVisible
+    , dscan = dscan
     }
 
 
