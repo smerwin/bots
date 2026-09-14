@@ -1138,12 +1138,40 @@ station/structure settings, and `runAway`'s own fallback to
 `dockToRandomStationOrStructure` when none are configured, rather than
 building a second way to leave.
 
-**`aggressive = yes` replaces that `runAway` with `engageHostiles`**, the same
-substitution `returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones` makes
-for its own shield-percentage trigger -- one setting, read in one place
-(`engageHostiles` itself), rather than two copies of the same override. A
-D-Scan-only sighting the ship has not met on grid yet still falls back to
-`runAway`, since `engageHostiles` can only lock what is on the overview.
+**`aggressive = yes` cancels that retreat outright, in this branch alone.**
+Something already on the overview is still handed to `engageHostiles`, exactly
+as before -- that part is unchanged. What changes is the fallback below it: a
+D-Scan sighting (or an overview pilot `hostileOverviewEntries`'s rat-colour and
+warp-disrupt tests do not happen to catch) that `engageHostiles` cannot lock no
+longer sends the ship running. It launches drones and waits for the target to
+come into range instead, through `readyDronesForGridHostile` -- only when the
+grid verdict is `SomethingIsOnTheGrid`, a genuine hostile signal.
+
+A grid this bot merely _cannot confirm_ -- `CannotTellWhetherTheGridIsClean`,
+no D-Scan window, a stale scan, an unreadable Local -- no longer triggers a
+flee either, under `aggressive`. Fleeing from evidence and fleeing from doubt
+were the same branch before this change; aggressive mode now runs from
+neither, and there is nothing to launch drones at on doubt alone, so the
+reading falls through to ordinary mining (`Nothing`) in both of those cases.
+`describeWormholeSafety` still prints the grid clause on every reading
+regardless of what the decision tree does with it, so this is silence in the
+decision log rather than in the status line -- an operator watching the
+console still sees `CANNOT TELL` or `SOMETHING IS HERE` climb, only the "leave
+rather than keep mining" line stops repeating underneath it.
+
+The shield-percentage retreat in
+`returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones` is untouched by
+any of this -- the cancellation is scoped to the wormhole grid check alone.
+Being shot for real still outranks standing still waiting on drones, and that
+caller still falls back to `runAway` exactly as it always has.
+
+**Untested against a live client.** Runs 22 and 23 both spent long stretches
+of `CannotTellWhetherTheGridIsClean` -- the Directional Scanner never held a
+scan fresher than its own staleness bound for most of either session --
+fleeing with no genuine hostile in either run. This change answers that
+corpus; nothing here has watched a live D-Scan hostile contact yet, so what
+happens when `SomethingIsOnTheGrid` actually fires under `aggressive` is
+still to be seen on a run.
 
 -}
 wormholeSafetyStep : BotDecisionContext -> Maybe DecisionPathNode
@@ -1160,24 +1188,40 @@ wormholeSafetyStep context =
                 let
                     evidence =
                         gridEvidenceFromContext context
+
+                    verdict =
+                        gridVerdict evidence
                 in
-                if gridReadsClean (gridVerdict evidence) then
+                if gridReadsClean verdict then
                     Nothing
 
                 else
-                    Just
-                        (describeBranch
-                            (describeGrid evidence)
-                            (case engageHostiles context of
-                                Just engaging ->
-                                    engaging
+                    case engageHostiles context of
+                        Just engaging ->
+                            Just (describeBranch (describeGrid evidence) engaging)
 
-                                Nothing ->
-                                    describeBranch
-                                        "This is a wormhole -- leave rather than keep mining."
-                                        (runAway context)
-                            )
-                        )
+                        Nothing ->
+                            if aggressiveIsEnabled context then
+                                case verdict of
+                                    SomethingIsOnTheGrid _ ->
+                                        readyDronesForGridHostile context
+                                            |> Maybe.map (describeBranch (describeGrid evidence))
+
+                                    CannotTellWhetherTheGridIsClean _ ->
+                                        Nothing
+
+                                    GridIsClean ->
+                                        Nothing
+
+                            else
+                                Just
+                                    (describeBranch
+                                        (describeGrid evidence)
+                                        (describeBranch
+                                            "This is a wormhole -- leave rather than keep mining."
+                                            (runAway context)
+                                        )
+                                    )
 
 
 goodStandingPatterns : List String
@@ -3185,10 +3229,14 @@ locked.
 
 `Nothing` where there is nothing on the overview to fight at all -- a
 wormhole hostile the Directional Scanner has seen but that has not yet
-arrived on grid, for instance -- so both callers fall back to their own
-flight response rather than sitting still commanding an engagement against
-nothing. Also `Nothing`, unconditionally, while `aggressive = no`, which is
-what keeps both callers' default behaviour unchanged.
+arrived on grid, for instance -- so each caller falls back to its own next
+step rather than sitting still commanding an engagement against nothing.
+`wormholeSafetyStep` readies drones for exactly that case instead of fleeing
+it (see `readyDronesForGridHostile`); `returnDronesAndRunAwayIfHitpointsAreTooLowOrWithoutDrones`
+still falls back to `runAway`, since that caller is about this ship's own
+survival rather than about a wormhole's paranoia. Also `Nothing`,
+unconditionally, while `aggressive = no`, which is what keeps every caller's
+default behaviour unchanged.
 
 -}
 engageHostiles : BotDecisionContext -> Maybe DecisionPathNode
@@ -3266,6 +3314,31 @@ engageTargetWithDrones context =
                                 context
                             )
                         )
+            )
+
+
+{-| `wormholeSafetyStep`'s answer, under `aggressive = yes`, to a genuine
+hostile signal (`SomethingIsOnTheGrid`) that `engageHostiles` cannot lock --
+a D-Scan sighting that has not arrived on grid yet, most often, since an
+overview row usually falls to the rat-colour or warp-disrupt test in
+`hostileOverviewEntries` first. Launch drones and stand ready rather than run
+from a threat there is nothing to shoot at yet.
+
+`Nothing` where there is nothing left to launch -- the bay is empty, or the
+drones are already out at the space limit -- so the reading falls through to
+ordinary mining instead of repeating a launch with nothing to do. That also
+covers the common case: once the drones are out, later readings of the same
+sighting launch nothing further and the ship keeps mining with drones already
+standing by, until `engageHostiles` finds something on the overview to send
+them after.
+
+-}
+readyDronesForGridHostile : BotDecisionContext -> Maybe DecisionPathNode
+readyDronesForGridHostile context =
+    launchDrones context
+        |> Maybe.map
+            (describeBranch
+                "Nothing on the overview to lock yet -- launch drones and stand ready rather than run."
             )
 
 
