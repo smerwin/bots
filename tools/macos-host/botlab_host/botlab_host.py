@@ -1653,6 +1653,32 @@ class VolatileHost:
         print(f"# unhandled volatile-process request: {sorted(req)}", file=sys.stderr)
         return json.dumps({"CompletedEffectSequenceOnWindow": True})
 
+    # How often the still-searching heartbeat may speak, in seconds. The phase
+    # lines alone leave a silent stretch as long as the dump itself -- tens of
+    # seconds with nothing on screen, which is the gap this whole change is
+    # about -- so the clock is shown moving inside a phase as well as between
+    # phases. Slow enough that a search finishing promptly says nothing extra.
+    ROOT_SEARCH_HEARTBEAT_SECONDS = 15
+
+    def _note_root_search_phase(self, process_id, name, began):
+        """Say which part of the root search is running, on stderr.
+
+        Wrapped in its own method so the worker thread and the heartbeat agree
+        on the wording and the elapsed clock, and so a failure to *report*
+        progress can never take down the search it is reporting on -- printing
+        is the one thing here with no business raising."""
+        try:
+            state = self.root_search.get(process_id)
+            elapsed = time.monotonic() - began
+            if state is not None:
+                state["phase"] = name
+                state["phase_at"] = time.monotonic()
+                state["began_monotonic"] = began
+            print(f"# UI root search (pid {process_id}, {elapsed:.0f}s): {name}",
+                  file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
     def _search_ui_root(self, process_id):
         now_ms = int(time.time() * 1000)
         if process_id in self.roots:
@@ -1669,6 +1695,26 @@ class VolatileHost:
             t.start()
 
         if state["result"] == "pending":
+            # The heartbeat, and the reason it is on this side rather than in
+            # the worker: the worker is *inside* a phase for tens of seconds at
+            # a time and has no loop to hang a clock on, while this runs once
+            # per tick because the bot keeps asking. Rate-limited so it marks
+            # time rather than filling the window -- the bot's own status line
+            # is already reprinted every tick, and this exists to be the one
+            # line on screen that changes.
+            try:
+                last = state.get("heartbeat_at")
+                now = time.monotonic()
+                if last is None or now - last >= self.ROOT_SEARCH_HEARTBEAT_SECONDS:
+                    state["heartbeat_at"] = now
+                    began = state.get("began_monotonic")
+                    elapsed = (now - began) if began else (now_ms - state["begin"]) / 1000.0
+                    print(f"# UI root search (pid {process_id}, {elapsed:.0f}s): still"
+                          f" {state.get('phase') or 'starting up'} -- this is the one-time"
+                          f" cost of finding the client's UI tree, not a hang",
+                          file=sys.stderr, flush=True)
+            except Exception:
+                pass
             return {
                 "processId": process_id,
                 "stage": {"SearchUIRootAddressInProgress": {
@@ -1732,11 +1778,53 @@ class VolatileHost:
         Blocks the calling thread until it has an answer (or gives up), which
         is why the only caller is `_search_ui_root_worker` on a background
         thread: the request-handling thread answers `SearchUIRootAddress` with
-        the search's current stage and returns immediately."""
+        the search's current stage and returns immediately.
+
+        **It says what it is doing, and that is not decoration.** This search
+        took 81 seconds on a live client on 2026-09-12, and for every one of
+        them the only thing on the operator's screen was the bot's own status
+        line repeating `Search the address of the UI root in process NNNNN`
+        unchanged -- because that line is the *bot's*, re-derived each tick from
+        a setup state that genuinely has not moved. A slow search and a hung one
+        were therefore indistinguishable from outside, and the operator reported
+        the Spotlight launcher as broken when it was working. It had good reason
+        to look broken: the loop this repository actually shipped once (#455)
+        presents the same way, as a setup line repeating forever.
+
+        So each phase announces itself on stderr, which is where the launcher's
+        own output goes and what the terminal window shows. The phases are the
+        real ones rather than a spinner -- an operator who sees a phase line at
+        all knows the host has not wedged, and one watching which phase is slow
+        is reading a measurement rather than a guess.
+
+        **It corrected a belief in this file on its first run**, which is the
+        argument for phases over a spinner. A cold search timed on 2026-09-12:
+
+            dumping process memory        10s
+            indexing the dump             ~0s
+            scanning for a seed object    24s
+            bootstrapping the str type    20s
+            walking up to the UI root     41s
+            ----------------------------------
+            total                         95s
+
+        The dump was labelled "the long one" here and is the *shortest*
+        substantive phase; `_cached_ui_root`'s own doc comment still calls the
+        dump "(~20-40s) ... the whole cost of starting the bot", and it is a
+        tenth of the wall clock. The cost is in the two repr scans and the walk
+        to the root -- which is where anybody trying to make this faster should
+        look, and is not where either comment pointed."""
+        began = time.monotonic()
+
+        def phase(name):
+            self._note_root_search_phase(process_id, name, began)
+
+        phase("checking the cached root")
         cached = self._cached_ui_root(process_id)
         if cached is not None:
             self.metatype[process_id] = cached["metatype"]
             self.str_type[process_id] = cached["str_type"]
+            phase("reused the cached root -- no dump needed")
             return cached["root"]
         if IS_WINDOWS:
             # No dump and no repr scan: the text macOS seeds from is not in this
@@ -1755,18 +1843,26 @@ class VolatileHost:
                 return None
         try:
             with tempfile.TemporaryDirectory() as d:
+                phase("dumping process memory")
                 subprocess.run([MEMORY_SAMPLE_BIN, str(process_id), d], check=True,
                                 capture_output=True)
+                phase("indexing the dump")
                 sample = rh.Sample(d)
+                phase("scanning for a seed object")
                 metatype = rh.find_metatype(sample, self._any_seed_addr(sample))
                 if metatype is None:
+                    phase("GAVE UP -- no seed resolved to a valid metatype")
                     return None
+                phase("bootstrapping the str type")
                 str_type = self._bootstrap_str_type(sample, metatype)
                 self.metatype[process_id] = metatype
                 self.str_type[process_id] = str_type
+                phase("walking up to the UI root")
                 root = rh.find_ui_root(sample, metatype, str_type)
                 if root is not None:
                     self._store_ui_root_cache(process_id, root, metatype, str_type)
+                phase("found the UI root" if root is not None
+                      else "GAVE UP -- no UI root found in the dump")
                 return root
         except Exception as exc:
             print(f"# SearchUIRootAddress failed: {exc}", file=sys.stderr)
